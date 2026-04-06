@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccv"
+version = "0.1.0"
+description = "Calibrated Completion Verifiers: calibrated verification and budgeted search for coding and terminal agents"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [{name = "Manav Agarwal", email = "manav@hanaml.com"}]
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+paper = ["scipy>=1.10", "matplotlib>=3.7"]
+hf = ["torch>=2.2", "transformers>=4.45"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
