@@ -1,0 +1,34 @@
+# Paper configuration for SWE-bench Verified (Section 4). Requires GPU weights and the
+# SWE-bench harness; see README "Full-scale runs".
+policy = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+scaffold = "openhands"
+max_turns = 100
+temperature = 0.7
+top_p = 0.95
+rollouts_per_task = 16
+seeds = [0, 1, 2, 3, 4]
+
+[verifier]
+base_model = "Qwen/Qwen3-8B"
+max_length = 24576
+lr = 1e-5
+batch_size = 256
+steps = 3000
+warmup = 150
+pairwise_weight = 0.3
+hard_negative_weight = 3.0
+prefix_progress_beta = [1.2, 1.0]
+
+[calibration]
+method = "platt"
+n_tasks = 400
+
+[search]
+tau_stop = 0.88
+tau_prune = 0.25
+prune_progress = 0.30
+k_max = 16
+
+[crc]
+alpha = 0.10
+n_min = 20

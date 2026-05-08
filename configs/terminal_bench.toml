@@ -1,0 +1,19 @@
+# Paper configuration for Terminal-Bench 2.0.
+policy = "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+scaffold = "terminus-2"
+rollouts_per_task = 16
+seeds = [0, 1, 2, 3, 4]
+
+[calibration]
+method = "platt"
+n_tasks = 300
+
+[search]
+tau_stop = 0.84
+tau_prune = 0.25
+prune_progress = 0.30
+k_max = 16
+
+[crc]
+alpha = 0.10
+n_min = 20
