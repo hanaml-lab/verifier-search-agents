@@ -21,7 +21,8 @@ class LogisticVerifier:
         return np.asarray(X, dtype=float) @ self.w + self.b
 
     def fit(self, X, y, progress=None, task_ids=None):
-        X = np.asarray(X, dtype=float); y = np.asarray(y, dtype=float)
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float)
         wts = 0.5 + (np.ones(len(y)) if progress is None else np.asarray(progress, dtype=float))
         pairs = self._pairs(y, task_ids) if (task_ids is not None and self.lam > 0) else None
         for _ in range(self.epochs):
@@ -43,18 +44,19 @@ class LogisticVerifier:
     def _pairs(y, task_ids, max_pairs=20000, seed=0):
         rng = np.random.default_rng(seed)
         task_ids = np.asarray(task_ids)
-        I, J = [], []
+        first, second = [], []
         for t in np.unique(task_ids):
             idx = np.where(task_ids == t)[0]
             pos, neg = idx[y[idx] == 1], idx[y[idx] == 0]
             for a in pos:
                 for b in neg:
-                    I.append(a); J.append(b)
-        I, J = np.array(I, dtype=int), np.array(J, dtype=int)
-        if len(I) > max_pairs:
-            sel = rng.choice(len(I), max_pairs, replace=False)
-            I, J = I[sel], J[sel]
-        return I, J
+                    first.append(a)
+                    second.append(b)
+        first, second = np.array(first, dtype=int), np.array(second, dtype=int)
+        if len(first) > max_pairs:
+            sel = rng.choice(len(first), max_pairs, replace=False)
+            first, second = first[sel], second[sel]
+        return first, second
 
 
 class HFVerifier:  # pragma: no cover - needs GPU weights

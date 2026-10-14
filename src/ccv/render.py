@@ -12,7 +12,7 @@ def execution_features(steps: list[dict]) -> dict:
     last = runs[-1] if runs else None
     summary = ""
     if last:
-        lines = [l for l in last.get("output", "").splitlines() if l.strip()]
+        lines = [line for line in last.get("output", "").splitlines() if line.strip()]
         summary = lines[-1] if lines else ""
     return {"n_test_runs": len(runs), "last_exit": None if last is None else last.get("exit", None), "last_summary": summary}
 

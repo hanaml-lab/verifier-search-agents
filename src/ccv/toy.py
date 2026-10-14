@@ -58,5 +58,8 @@ def training_set(tasks, rollouts_per_task: int, seed: int, ability: float = 0.0)
         for _ in range(rollouts_per_task):
             r = ToyRollout(t, rng, ability)
             for p in (rng.beta(1.2, 1.0), 1.0):
-                X.append(r.features(p)); y.append(r.success); prog.append(p); tid.append(t.tid)
+                X.append(r.features(p))
+                y.append(r.success)
+                prog.append(p)
+                tid.append(t.tid)
     return np.array(X), np.array(y), np.array(prog), np.array(tid)

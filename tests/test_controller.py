@@ -1,5 +1,3 @@
-import numpy as np
-
 from ccv import SearchConfig, adaptive_search, best_of_k
 
 
