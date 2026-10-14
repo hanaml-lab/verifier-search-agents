@@ -1,0 +1,29 @@
+# CPU toy setting for python -m ccv.demo: runs end to end in seconds.
+seed: 0
+n_train_tasks: 300
+n_cal_tasks: 200
+n_test_tasks: 300
+rollouts_per_train_task: 8
+rollouts_per_cal_task: 8
+ability: 0.0
+
+verifier:
+  lr: 0.2
+  epochs: 300
+  pairwise_weight: 0.3
+
+search:
+  tau_stop: 0.85
+  tau_prune: 0.25
+  prune_progress: 0.30
+  k_max: 16
+  best_of_k: 8
+
+crc:
+  alpha: 0.10
+  n_min: 20
+
+# false-finish control: realised rate on fresh test completions for each target alpha, pooled over seeds
+sweep:
+  alphas: [0.05, 0.10, 0.20]
+  seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
