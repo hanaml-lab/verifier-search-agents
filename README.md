@@ -97,7 +97,7 @@ These numbers come from the report's seeded simulation and are illustrative.
 | CCV adaptive, matched compute | 71.5 ± 1.5 | 5.30 | 43.8 ± 2.5 | 10.95 |
 | Oracle pass@8 | 73.8 ± 0.9 | — | 43.8 ± 1.1 | — |
 
-`bash scripts/reproduce_paper.sh` regenerates every table and figure. On every push, CI reruns `paper/make_data.py` and checks its tables and results against `paper/results.sha256` (`python paper/check_results.py`), so the report's numbers are exactly what the script emits.
+`bash scripts/reproduce_paper.sh` regenerates the tables and figures that the report's seeded simulation produces. On every push, CI reruns `paper/make_data.py` and checks the tables and results it writes against `paper/results.sha256` (`python paper/check_results.py`).
 
 ## Layout
 
