@@ -86,15 +86,16 @@ result = adaptive_search(new_rollout, q_prefix, q_final, cfg)    # new_rollout()
 
 ## Results (from the report)
 
-These numbers come from the report's seeded simulation and are illustrative.
+These numbers come from the report's seeded simulation and are illustrative. The adaptive rows' stop thresholds are set on the calibration tasks, to match the strongest baseline's best-of-8 accuracy or its compute there.
 
 | Selector | SWE-bench Verified | Tok./task (M) | Terminal-Bench 2.0 | Tok./task (M) |
 |---|---|---|---|---|
 | Single rollout (pass@1) | 51.6 ± 1.2 | 0.61 | 23.6 ± 2.6 | 1.36 |
 | Hybrid verifier (R2E-Gym-style), best-of-8 | 64.0 ± 0.8 | 5.21 | 36.2 ± 3.0 | 10.91 |
 | CCV, best-of-8 | 67.0 ± 0.9 | 5.21 | 37.8 ± 2.2 | 10.91 |
-| CCV adaptive, matched accuracy | 65.1 ± 1.3 | 2.01 | 40.2 ± 1.5 | 6.06 |
-| CCV adaptive, matched compute | 71.5 ± 1.5 | 5.30 | 43.8 ± 2.5 | 10.95 |
+| Hybrid verifier + learned stop | 67.0 ± 1.6 | 5.39 | 35.1 ± 3.4 | 11.19 |
+| CCV adaptive, matched accuracy | 68.8 ± 1.6 | 3.13 | 40.2 ± 1.5 | 6.06 |
+| CCV adaptive, matched compute | 71.5 ± 1.5 | 5.30 | 43.8 ± 2.5 | 11.57 |
 | Oracle pass@8 | 73.8 ± 0.9 | — | 43.8 ± 1.1 | — |
 
 `bash scripts/reproduce_paper.sh` regenerates the tables and figures that the report's seeded simulation produces. On every push, CI reruns `paper/make_data.py` and checks the tables and results it writes against `paper/results.sha256` (`python paper/check_results.py`).

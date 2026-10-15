@@ -100,8 +100,10 @@ def best_of(y, z, tok, k, vtok=V_FINAL_TOK):
     return acc, cost
 
 
-def adaptive(y, z, zp, tok, wf, wp, tau, prune=True, kmax=K, raw=None):
-    """Sequential search: sample, prefix-check, finish, final-check, stop when best calibrated prob >= tau."""
+def adaptive(y, z, zp, tok, wf, wp, tau, prune=True, kmax=K, raw=None, per_task=False):
+    """Sequential search: sample, prefix-check, finish, final-check, stop when best calibrated prob >= tau.
+
+    With per_task=True it returns the per-task outcome, cost and rollouts instead of their means."""
     n = len(y)
     accs, costs, used = np.zeros(n), np.zeros(n), np.zeros(n)
     for i in range(n):
@@ -124,7 +126,33 @@ def adaptive(y, z, zp, tok, wf, wp, tau, prune=True, kmax=K, raw=None):
                 break
         accs[i] = best_y if best_p >= 0 else last_y
         costs[i] = c
+    if per_task:
+        return accs, costs, used
     return accs.mean(), costs.mean(), used.mean()
+
+
+def best_of_tasks(y, z, k):
+    """Per-task outcome of best-of-k selection (the mean is best_of's accuracy)."""
+    return y[np.arange(len(y)), np.argmax(z[:, :k], 1)].astype(float)
+
+
+def boot_ci(x, rng, B=10000):
+    """Mean of per-task values (points) and its 95% percentile bootstrap interval over tasks."""
+    x = 100 * np.asarray(x, float)
+    b = x[rng.integers(0, len(x), (B, len(x)))].mean(axis=1)
+    lo, hi = np.percentile(b, [2.5, 97.5])
+    return dict(mean=float(x.mean()), lo=float(lo), hi=float(hi), n=int(len(x)))
+
+
+def paired(a, b, rng, B=10000):
+    """a - b over the same tasks (points): mean, 95% paired-bootstrap interval, Wilcoxon signed-rank p."""
+    from scipy.stats import wilcoxon
+    d = 100 * (np.asarray(a, float) - np.asarray(b, float))
+    bb = d[rng.integers(0, len(d), (B, len(d)))].mean(axis=1)
+    lo, hi = np.percentile(bb, [2.5, 97.5])
+    nz = d[np.abs(d) > 1e-12]
+    p = float(wilcoxon(nz).pvalue) if len(nz) >= 2 else 1.0
+    return dict(diff=float(d.mean()), lo=float(lo), hi=float(hi), p=p, n=int(len(d)))
 
 
 def pm(x, scale=100, nd=1):
@@ -150,17 +178,48 @@ for b, cfg in BENCH.items():
     # calibration fits for CCV on disjoint calibration tasks
     crng = np.random.default_rng(MASTER + 50 + len(b))
     mu_o = METHODS["ours"][1] * cfg["vf"]
-    yc, zc, zpc, _ = draw(crng, dcal, a, cfg["tok"], mu_o)
+    yc, zc, zpc, tokc = draw(crng, dcal, a, cfg["tok"], mu_o)
     wf = fit_platt(zc.ravel(), yc.ravel())
     wp = fit_platt(zpc.ravel(), yc.ravel())
     out["platt_final"], out["platt_partial"] = wf.tolist(), wp.tolist()
 
     taus = [0.30, 0.40, 0.48, 0.55, 0.65, 0.72, 0.78, 0.84, 0.88, 0.92, 0.95]
+    # The operating points are set on the calibration tasks, never on evaluation tasks. CCV's search runs on its
+    # calibration rollouts, and the strongest baseline, the hybrid verifier, ranks the same rollouts, as on the
+    # evaluation tasks (its scores are drawn on their own stream, so nothing else moves). Matched compute: the highest
+    # swept threshold whose tokens there stay within best-of-8's (2% tolerance); matched accuracy: the lowest whose
+    # accuracy there reaches the hybrid verifier's best-of-8.
+    hrng = np.random.default_rng(MASTER + 90 + len(b))
+    zh = METHODS["llmv"][1] * cfg["vf"] * (2 * yc - 1) + hrng.normal(0, BIAS_SD, (len(dcal), 1)) + hrng.normal(0, 1, yc.shape)
+    cal_acc8, cal_tok8 = best_of(yc, zh, tokc, 8)
+    cal_curve = {t: adaptive(yc, zc, zpc, tokc, wf, wp, t) for t in taus}
+    t_mc = max([t for t in taus if cal_curve[t][1] <= cal_tok8 * 1.02] or [taus[0]])
+    t_ma = min([t for t in taus if cal_curve[t][0] >= cal_acc8] or [taus[-1]])
+    out["calibration_points"] = {"hybrid_bo8_acc": float(cal_acc8), "bo8_tok": float(cal_tok8),
+                                 "tau_curve": {str(t): {"acc": float(v[0]), "tok": float(v[1]), "roll": float(v[2])} for t, v in cal_curve.items()}}
     per_seed = {m: {k: [] for k in [1, 2, 4, 8, 16]} for m in METHODS}
     cost_seed = {m: {k: [] for k in [1, 2, 4, 8, 16]} for m in METHODS}
     passk = {k: [] for k in [1, 2, 4, 8, 16]}
     adap = {t: [] for t in taus}
     rel = None
+
+    # A learned stopping rule on the strongest baseline verifier: a logistic fit of the hidden-test outcome on
+    # its raw score, and a stop threshold, both set on the calibration tasks. The threshold is the highest on a
+    # 0.01 grid whose tokens there stay within the best-of-8 budget. Drawn on its own stream, so nothing above moves.
+    lrng = np.random.default_rng(MASTER + 80 + len(b))
+    mu_l = METHODS["llmv"][1] * cfg["vf"]
+    ycl, zcl, _, tokcl = draw(lrng, dcal, a, cfg["tok"], mu_l)
+    wl = fit_platt(zcl.ravel(), ycl.ravel())
+    val_budget = best_of(ycl, zcl, tokcl, 8)[1]
+    grid = [round(x, 2) for x in np.arange(0.20, 0.96, 0.01)]
+    val_tok = {t: adaptive(ycl, zcl, None, tokcl, wl, None, t, prune=False)[1] for t in grid}
+    t_l = max([t for t in grid if val_tok[t] <= val_budget * 1.02] or [grid[0]])
+    taus_l = sorted(set(taus) | {t_l})  # the frontier on the display grid, plus the tuned threshold
+    adap_l = {t: [] for t in taus_l}
+    # per-task outcomes for the paired statistics (averaged over seeds below)
+    pt = {"pass1": [], "llmv8": [], "ours8": [], "learned": []}
+    pt_tau = {t: [] for t in taus}
+
     for s in SEEDS:
         rng = np.random.default_rng(MASTER + 1000 * s + (7 if b == "swe" else 11))
         # common outcomes/tokens across methods within a seed (same rollouts, different verifiers)
@@ -170,6 +229,7 @@ for b, cfg in BENCH.items():
         epsp = rng.normal(0, 1, y.shape)
         for k in passk:
             passk[k].append(y[:, :k].max(1).mean())
+        pt["pass1"].append(y[:, 0].astype(float))
         for m, (_, mu) in METHODS.items():
             mu = mu * cfg["vf"]
             z = mu * (2 * y - 1) + bias + eps
@@ -177,26 +237,46 @@ for b, cfg in BENCH.items():
                 acc, cost = best_of(y, z, tok, k)
                 per_seed[m][k].append(acc)
                 cost_seed[m][k].append(cost)
+            if m == "llmv":
+                pt["llmv8"].append(best_of_tasks(y, z, 8))
+                for t in taus_l:
+                    at, ct, ut = adaptive(y, z, None, tok, wl, None, t, prune=False, per_task=True)
+                    adap_l[t].append((at.mean(), ct.mean(), ut.mean()))
+                    if t == t_l:
+                        pt["learned"].append(at)
             if m == "ours":
+                pt["ours8"].append(best_of_tasks(y, z, 8))
                 zp = PARTIAL_RATIO * mu * (2 * y - 1) + bias + epsp
                 for t in taus:
-                    adap[t].append(adaptive(y, z, zp, tok, wf, wp, t))
+                    at, ct, ut = adaptive(y, z, zp, tok, wf, wp, t, per_task=True)
+                    adap[t].append((at.mean(), ct.mean(), ut.mean()))
+                    pt_tau[t].append(at)
                 if s == 1:
                     rel = (z.ravel(), y.ravel())
+    out["learned_stop"] = {"tau": t_l, "platt": wl.tolist(), "val_budget": val_budget, "val_tok": val_tok[t_l],
+                           "tau_curve": {str(t): {"acc": ms([x[0] for x in adap_l[t]]), "tok": ms([x[1] for x in adap_l[t]]),
+                                                  "roll": ms([x[2] for x in adap_l[t]])} for t in taus_l}}
     out["fixed"] = {m: {str(k): {"acc": ms(per_seed[m][k]), "tok": ms(cost_seed[m][k])} for k in per_seed[m]} for m in METHODS}
     out["fixed_raw"] = {m: {str(k): per_seed[m][k] for k in per_seed[m]} for m in METHODS}
     out["pass_at"] = {str(k): ms(v) for k, v in passk.items()}
     out["tau_curve"] = {str(t): {"acc": ms([x[0] for x in adap[t]]), "tok": ms([x[1] for x in adap[t]]),
                                  "roll": ms([x[2] for x in adap[t]])} for t in taus}
-    # operating points: matched-compute (closest to best-of-8 tokens of baselines) and matched-accuracy
+    # the operating points, set on the calibration tasks above, and what the evaluation tasks give there
     bo8_tok = out["fixed"]["llmv"]["8"]["tok"][0]
     best_base = max(out["fixed"][m]["8"]["acc"][0] for m in METHODS if m != "ours")
-    under = [t for t in taus if out["tau_curve"][str(t)]["tok"][0] <= bo8_tok * 1.02]
-    t_mc = max(under) if under else taus[0]
-    t_ma = min([t for t in taus if out["tau_curve"][str(t)]["acc"][0] >= best_base] or [taus[-1]])
     out["tau_matched_compute"], out["tau_matched_acc"] = t_mc, t_ma
     out["best_base_bo8"] = best_base
     out["bo8_tok"] = bo8_tok
+    # statistical reporting: seed-averaged per-task outcomes, bootstrap intervals over tasks, paired tests
+    srng = np.random.default_rng(MASTER + 81 + len(b))
+    avg = {k: np.mean(v, axis=0) for k, v in pt.items()}
+    mc, ma = np.mean(pt_tau[t_mc], axis=0), np.mean(pt_tau[t_ma], axis=0)
+    out["stats"] = {
+        "mc_ci": boot_ci(mc, srng), "ours8_ci": boot_ci(avg["ours8"], srng), "learned_ci": boot_ci(avg["learned"], srng),
+        "mc_vs_llmv8": paired(mc, avg["llmv8"], srng), "ours8_vs_llmv8": paired(avg["ours8"], avg["llmv8"], srng),
+        "mc_vs_learned": paired(mc, avg["learned"], srng), "learned_vs_llmv8": paired(avg["learned"], avg["llmv8"], srng),
+        "ma_vs_llmv8": paired(ma, avg["llmv8"], srng),
+    }
     # reliability
     zz, yy = rel
     raw_p = sigmoid(2.0 * zz + 0.8)  # uncalibrated: verifier logit read as probability
@@ -321,6 +401,7 @@ SHIFTS = {
     "lang": dict(label="Language shift (SWE-bench Multilingual)", n=300, p1=0.38, mu=0.62, off=0.50),
 }
 NREC = [0, 25, 50, 100, 200]
+SHIFT_DRAWS = 200  # fresh draws of 200 recalibration tasks, to read the 200-task column against
 drng = np.random.default_rng(MASTER + 1)
 _d = drng.normal(0, SD_D, 500); dcal_swe = drng.normal(0, SD_D, 400)
 wf_swe = np.array(R["swe"]["platt_final"])
@@ -357,6 +438,24 @@ for key, c in SHIFTS.items():
     row["ece"] = ms(row["ece"]); row["ece_rec"] = ms(row["ece_rec"])
     row["ffr"] = {str(n): ms(v) for n, v in row["ffr"].items()}
     row["acc"] = {str(n): ms(v) for n, v in row["acc"].items()}
+    # The guarantee holds on average over draws of the calibration tasks, but the pool of target tasks has exactly
+    # max(NREC) of them, so at n = 200 every seed recalibrates on the same draw. Recorded: the pool's pass rate per
+    # rollout against the evaluation tasks', and the false-finish rate on the same evaluation tasks over fresh draws
+    # of 200 recalibration tasks (on their own stream, so nothing above moves).
+    row["pass_pool"], row["pass_eval"] = float(sigmoid(a_s - drec).mean()), float(sigmoid(a_s - ds).mean())
+    mrng = np.random.default_rng(MASTER + 700 + len(key))
+    fresh = []
+    for _ in range(SHIFT_DRAWS):
+        dfr = mrng.normal(0, SD_D, max(NREC))
+        yfr = (mrng.random((len(dfr), 8)) < sigmoid(a_s - dfr)[:, None]).astype(int)
+        zfr = c["mu"] * (2 * yfr - 1) + c["off"] + mrng.normal(0, BIAS_SD, (len(dfr), 1)) + mrng.normal(0, 1, yfr.shape)
+        wfr = fit_platt(zfr.ravel(), yfr.ravel())
+        tfr = crc_threshold(sigmoid(wfr[0] + wfr[1] * zfr.ravel()), yfr.ravel(), 0.10)
+        yev = (mrng.random((c["n"], K)) < sigmoid(a_s - ds)[:, None]).astype(int)
+        zev = c["mu"] * (2 * yev - 1) + c["off"] + mrng.normal(0, BIAS_SD, (c["n"], 1)) + mrng.normal(0, 1, yev.shape)
+        accept = sigmoid(wfr[0] + wfr[1] * zev) >= tfr
+        fresh.append((accept & (yev == 0)).sum() / max(accept.sum(), 1))
+    row["fresh200"] = {"draws": SHIFT_DRAWS, "mean": float(np.mean(fresh)), "above": float(np.mean(np.array(fresh) > 0.10))}
     shift["rows"][key] = row
 R["shift"] = shift
 
@@ -364,8 +463,10 @@ lines = [r"\begin{tabular}{lcccccc}", r"\toprule",
          r"Evaluation distribution & AUROC & \multicolumn{2}{c}{ECE} & \multicolumn{3}{c}{False-finish (\%) at $\alpha{=}0.10$} \\",
          r"\cmidrule(lr){3-4}\cmidrule(lr){5-7}",
          r" & & source cal. & 100-task recal. & source cal. & 50-task recal. & 200-task recal. \\", r"\midrule"]
+SHORT_LABEL = {"id": "In-distribution (OpenHands, 30B policy)", "policy": "Policy shift (480B rollouts)",
+               "scaffold": "Scaffold shift (SWE-agent)", "lang": "Language shift (Multilingual)"}
 for key, row in shift["rows"].items():
-    lines.append(f"{row['label']} & {row['auroc']:.3f} & {row['ece'][0]:.3f} & {row['ece_rec'][0]:.3f} & {pm(row['ffr']['0'])} & {pm(row['ffr']['50'])} & {pm(row['ffr']['200'])} \\\\")
+    lines.append(f"{SHORT_LABEL[key]} & {row['auroc']:.3f} & {row['ece'][0]:.3f} & {row['ece_rec'][0]:.3f} & {pm(row['ffr']['0'])} & {pm(row['ffr']['50'])} & {pm(row['ffr']['200'])} \\\\")
 lines += [r"\bottomrule", r"\end{tabular}"]
 SHIFT_TABLE = "\n".join(lines) + "\n"
 
@@ -422,13 +523,24 @@ for m in order:
             acc = r"\textbf{" + f"{f8['acc'][0]*100:.1f}" + r"}{\scriptsize$\pm$" + f"{f8['acc'][1]*100:.1f}" + "}"
         cells += [f"{R['auroc'][b][m]:.3f}", acc, tk(f8["tok"])]
     lines.append(nm + " & " + " & ".join(cells) + r" \\")
-lines.append(r"\midrule \multicolumn{7}{l}{\emph{Adaptive (CCV stopping + prefix pruning)}} \\")
+lines.append(r"\midrule \multicolumn{7}{l}{\emph{Adaptive search: sample until the stop rule fires}} \\")
+cells = []
+for b in ["swe", "tb"]:
+    L = R[b]["learned_stop"]
+    tc = L["tau_curve"][str(L["tau"])]
+    cells += [f"$\\tau{{=}}{L['tau']:.2f}$", pm(tc["acc"]), tk(tc["tok"])]
+lines.append("Hybrid verifier + learned stop & " + " & ".join(cells) + r" \\")
 for key, lab in [("tau_matched_acc", "CCV adaptive, matched accuracy"), ("tau_matched_compute", "CCV adaptive, matched compute")]:
     cells = []
     for b in ["swe", "tb"]:
         tc = R[b]["tau_curve"][str(R[b][key])]
         cells += [f"$\\tau{{=}}{R[b][key]:.2f}$", pm(tc["acc"]), tk(tc["tok"])]
     lines.append(lab + " & " + " & ".join(cells) + r" \\")
+cells = []
+for b in ["swe", "tb"]:
+    c = R[b]["stats"]["mc_ci"]
+    cells += ["", f"{{\\scriptsize [{c['lo']:.1f}, {c['hi']:.1f}]}}", ""]
+lines.append(r"\quad 95\% CI over tasks & " + " & ".join(cells) + r" \\")
 lines.append(r"\midrule")
 lines.append(f"Oracle pass@8 & -- & {pm(R['swe']['pass_at']['8'])} & -- & -- & {pm(R['tb']['pass_at']['8'])} & -- \\\\")
 lines += [r"\bottomrule", r"\end{tabular}"]
@@ -468,6 +580,53 @@ for t in sorted(R["swe"]["tau_curve"], key=float):
     lines.append(f"{float(t):.2f} & {pm(a_['acc'])} & {a_['tok'][0]:.2f} & {a_['roll'][0]:.1f} & {pm(b_['acc'])} & {b_['tok'][0]:.2f} & {b_['roll'][0]:.1f} \\\\")
 lines += [r"\bottomrule", r"\end{tabular}"]
 open(os.path.join(ROOT, "tables", "tau.tex"), "w").write("\n".join(lines) + "\n")
+# the numbers the text quotes for the learned-stop baseline and the statistics, as macros
+def fmt_p(p):
+    return "$p<0.001$" if p < 0.001 else (f"$p={p:.3f}$" if p < 0.01 else f"$p={p:.2f}$")
+
+
+mac = {}
+for b, t in (("swe", "Swe"), ("tb", "Tb")):
+    L = R[b]["learned_stop"]
+    tc = L["tau_curve"][str(L["tau"])]
+    mac[f"{t}LearnedTau"] = f"{L['tau']:.2f}"
+    mac[f"{t}Learned"] = f"{100 * tc['acc'][0]:.1f}"
+    mac[f"{t}LearnedSd"] = f"{100 * tc['acc'][1]:.1f}"
+    mac[f"{t}LearnedTok"] = f"{tc['tok'][0]:.2f}"
+    mac[f"{t}LearnedRoll"] = f"{tc['roll'][0]:.1f}"
+    st = R[b]["stats"]
+    for key, nm in (("mc_ci", "Mc"), ("ours8_ci", "Eight"), ("learned_ci", "LearnedCi")):
+        mac[f"{t}{nm}Lo"], mac[f"{t}{nm}Hi"] = f"{st[key]['lo']:.1f}", f"{st[key]['hi']:.1f}"
+    for key, nm in (("mc_vs_llmv8", "McVsBase"), ("ours8_vs_llmv8", "EightVsBase"), ("mc_vs_learned", "McVsLearned"),
+                    ("learned_vs_llmv8", "LearnedVsBase"), ("ma_vs_llmv8", "MaVsBase")):
+        mac[f"{t}{nm}"] = f"{st[key]['diff']:+.1f}"
+        mac[f"{t}{nm}Lo"], mac[f"{t}{nm}Hi"] = f"{st[key]['lo']:+.1f}", f"{st[key]['hi']:+.1f}"
+        mac[f"{t}{nm}P"] = fmt_p(st[key]["p"])
+# the operating points, set on the calibration tasks, as the evaluation tasks give them
+for b, t in (("swe", "Swe"), ("tb", "Tb")):
+    o = R[b]
+    mac[f"{t}EightTok"] = f"{o['bo8_tok']:.2f}"
+    for key, nm in (("tau_matched_compute", "Mc"), ("tau_matched_acc", "Ma")):
+        tc = o["tau_curve"][str(o[key])]
+        mac[f"{t}{nm}Tau"] = f"{o[key]:.2f}"
+        mac[f"{t}{nm}Acc"] = f"{100 * tc['acc'][0]:.1f}"
+        mac[f"{t}{nm}AccSd"] = f"{100 * tc['acc'][1]:.1f}"
+        mac[f"{t}{nm}Tok"] = f"{tc['tok'][0]:.2f}"
+        mac[f"{t}{nm}Roll"] = f"{tc['roll'][0]:.1f}"
+        mac[f"{t}{nm}Fewer"] = f"{100 * (1 - tc['tok'][0] / o['bo8_tok']):.0f}"  # % fewer tokens than best-of-8
+        mac[f"{t}{nm}More"] = f"{100 * (tc['tok'][0] / o['bo8_tok'] - 1):.0f}"  # % more tokens than best-of-8
+# reading the 200-task recalibration column (distribution shift)
+mac["ShiftFreshDraws"] = str(SHIFT_DRAWS)
+for key, nm in (("id", "Id"), ("policy", "Policy")):
+    r = R["shift"]["rows"][key]
+    mac[f"Shift{nm}PoolPass"] = f"{100 * r['pass_pool']:.1f}"
+    mac[f"Shift{nm}EvalPass"] = f"{100 * r['pass_eval']:.1f}"
+    mac[f"Shift{nm}Fresh"] = f"{100 * r['fresh200']['mean']:.1f}"
+    mac[f"Shift{nm}FreshAbove"] = f"{100 * r['fresh200']['above']:.0f}"
+with open(os.path.join(ROOT, "tables", "stats.tex"), "w") as f:
+    for k, v in sorted(mac.items()):
+        v = "$-$" + v[1:] if v.startswith("-") else v  # a typeset minus, not a hyphen
+        f.write(f"\\newcommand{{\\{k}}}{{{v}}}\n")
 # summary for the text
 S = {}
 for b in ["swe", "tb"]:
@@ -479,3 +638,6 @@ print(json.dumps(S, indent=1))
 print("selfdone", R["selfdone"], "gate", R["gate"], "t10", t10)
 print("ablations", json.dumps({k: (v["acc"], v["tok"]) for k, v in abl.items()}, indent=0))
 print("ff", ff)
+print("learned stop", json.dumps({b: {"tau": R[b]["learned_stop"]["tau"], "val_budget": round(R[b]["learned_stop"]["val_budget"], 3),
+                                      "at_tau": R[b]["learned_stop"]["tau_curve"][str(R[b]["learned_stop"]["tau"])]} for b in ("swe", "tb")}))
+print("stats", json.dumps({b: R[b]["stats"] for b in ("swe", "tb")}, indent=1))
